@@ -19,7 +19,8 @@ import math
 from sklearn.metrics.cluster import normalized_mutual_info_score
 from sklearn.utils import linear_assignment_
 from sklearn.metrics import accuracy_score
-
+from munkres import Munkres, print_matrix
+import itertools
 # Settings
 parser = argparse.ArgumentParser()
 parser.add_argument('--lr', default=0.002, type=float, help='learning rate')
@@ -44,20 +45,28 @@ print(device)
 
 # Data
 print('==> Preparing data..')
+class MyDataset(torch.utils.data.Dataset):
+    # new dataset class that allows to get the sample indices of mini-batch
+    def __init__(self,root,download, train, transform):
+        self.MNIST = torchvision.datasets.MNIST(root=root,
+                                        download=download,
+                                        train=train,
+                                        transform=transform)
+    def __getitem__(self, index):
+        data, target = self.MNIST[index]
+        return data, target, index
+    
+    def __len__(self):
+        return len(self.MNIST)
 
 #transform_train = transforms.Compose([transforms.ToTensor(),transforms.Normalize((0.1307,), (0.3081,))])
 transform_train = transforms.Compose([transforms.ToTensor(),transforms.Normalize((0.5,), (0.5,))])
-trainset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform_train)
-trainset = [x for x in trainset]
-trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=False, num_workers=2)
-transform_test = transforms.Compose(
-                                     [transforms.ToTensor(),
-                                      transforms.Normalize((0.1307,), (0.3081,))])
-testset = torchvision.datasets.MNIST(root='./data', train=False, download=False, transform=transform_test)
-testset = [x for x in testset]
-testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=2)
-
-classes = ('0','1','2','3','4','5','6','7','8','9')
+#trainset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform_train)
+trainset = MyDataset(root='./data', train=True, download=True, transform=transform_train)
+testset = MyDataset(root='./data', train=False, download=False, transform=transform_train)
+trainset = trainset + testset
+trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=2)
+testloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=False, num_workers=2)
 tot_cl = 10
 
 # Deep Neural Network
@@ -83,12 +92,11 @@ class Net(nn.Module):
         self.fc3 = nn.Linear(1200, 10)
         torch.nn.init.normal_(self.fc3.weight,std=0.0001*math.sqrt(2/1200))
         self.fc3.bias.data.fill_(0)
-        self.bn1=nn.BatchNorm1d(1200)
-        #self.bn1_F= MyBatchNorm(1200,self.bn1)
-        self.bn1_F= nn.BatchNorm1d(1200,affine=False)
-        self.bn2=nn.BatchNorm1d(1200)
-        #self.bn2_F= MyBatchNorm(1200,self.bn2)
-        self.bn2_F= nn.BatchNorm1d(1200,affine=False)
+        self.bn1=nn.BatchNorm1d(1200, eps=2e-5)
+        # or self.bn1_F= MyBatchNorm(1200,self.bn1)
+        self.bn1_F= nn.BatchNorm1d(1200, eps=2e-5, affine=False)
+        self.bn2=nn.BatchNorm1d(1200, eps=2e-5)
+        self.bn2_F= nn.BatchNorm1d(1200, eps=2e-5 ,affine=False)
     
     def forward(self, x, update_batch_stats=True):
         if not update_batch_stats:
@@ -117,6 +125,7 @@ if use_cuda:
     net.to(device)
 
 # Loss function and optimizer
+
 def entropy(p):
     # compute entropy
     if (len(p.size())) == 2:
@@ -136,34 +145,34 @@ def kl(p, q):
     # compute KL divergence between p and q
     return torch.sum(p * torch.log((p + 1e-8) / (q + 1e-8))) / float(len(p))
 
+
 def vat(network, x, eps_list, xi=10, Ip=1):
     # compute the regularized penality [eq. (4) & eq. (6), 1]
-    with torch.no_grad():
-        with torch.enable_grad():
-            y = network(Variable(x))
-            d = torch.randn((x.size()[0],x.size()[1],x.size()[2]*x.size()[3]))
-            d = d /torch.reshape(torch.sqrt(torch.sum(torch.mul(d,d), dim=2)),(x.size()[0],x.size()[1],1))
-            d = torch.reshape(d,(x.size()[0],x.size()[1],x.size()[2],x.size()[3]))
-            for ip in range(Ip):
-                d_var = Variable(d)
-                if use_cuda:
-                    d_var = d_var.to(device)
-                d_var.requires_grad_(True)
-                y_p = network(x + xi * d_var)
-                kl_loss = kl(F.softmax(y,dim=1), F.softmax(y_p,dim=1))
-                #kl_loss.backward(retain_graph=True)
-                kl_loss.backward()
-                d = d_var.grad
-                d = torch.reshape(d,(x.size()[0],x.size()[1],x.size()[2]*x.size()[3]))
-                norm = torch.sqrt(torch.sum(torch.mul(d,d), dim=2))
-                norm[norm==0] = 1
-                d = d /torch.reshape(norm,(x.size()[0],x.size()[1],1))
-                d = torch.reshape(d,(x.size()[0],x.size()[1],x.size()[2],x.size()[3]))
-    delta = d 
+    
     y = network(Variable(x))
+    d = torch.randn((x.size()[0],x.size()[1],x.size()[2]*x.size()[3]))
+    d = d /torch.reshape(torch.sqrt(torch.sum(torch.mul(d,d), dim=2)),(x.size()[0],x.size()[1],1))
+    d = torch.reshape(d,(x.size()[0],x.size()[1],x.size()[2],x.size()[3]))
+    for ip in range(Ip):
+        d_var = Variable(d)
+        if use_cuda:
+            d_var = d_var.to(device)
+        d_var.requires_grad_(True)
+        y_p = network(x + xi * d_var)
+        kl_loss = kl(F.softmax(y,dim=1), F.softmax(y_p,dim=1))
+        kl_loss.backward(retain_graph=True)
+        #kl_loss.backward()
+        d = d_var.grad
+        d = torch.reshape(d,(x.size()[0],x.size()[1],x.size()[2]*x.size()[3]))
+        norm = torch.sqrt(torch.sum(torch.mul(d,d), dim=2))
+                #norm[norm==0] = 1
+        d = d /torch.reshape(norm,(x.size()[0],x.size()[1],1))
+        d = torch.reshape(d,(x.size()[0],x.size()[1],x.size()[2],x.size()[3]))
+    d_var = Variable(d)
     eps = args.prop_eps * eps_list
-    y2 = network(x + torch.reshape(eps,(x.size()[0],1,1,1)) * delta)
+    y2 = network(x + torch.reshape(eps,(x.size()[0],1,1,1)) * d_var)
     return kl(F.softmax(y,dim=1), F.softmax(y2,dim=1))
+
 
 def enc_aux_noubs(x):
     # not updating gamma and beta in batchs
@@ -174,9 +183,9 @@ def loss_unlabeled(x, eps_list):
     L = vat(enc_aux_noubs, x, eps_list)
     return L
 
-def upload_nearest_dist(batch_size,loader_number,dataset):
+def upload_nearest_dist(dataset):
     # Import the range of local perturbation for VAT
-    nearest_dist = np.loadtxt(dataset + '/' + 'loader_number'+ str(loader_number+1) + '_' 'batch_size'+ str(batch_size) + '_10th_neighbor.txt').astype(np.float32)
+    nearest_dist = np.loadtxt(dataset + '/' + '10th_neighbor.txt').astype(np.float32)
     return nearest_dist
 
 optimizer = optim.Adam(net.parameters(), lr=lr)
@@ -206,62 +215,74 @@ def bestMap(L1, L2):
 
     return accuracy_score(L1, newL2)
 
+def compute_accuracy(y_pred, y_t):
+    # compute the accuracy using Hungarian algorithm
+    m = Munkres()
+    mat = np.zeros((tot_cl, tot_cl))
+    for i in range(tot_cl):
+        for j in range(tot_cl):
+            mat[i][j] = np.sum(np.logical_and(y_pred == i, y_t == j))
+    indexes = m.compute(-mat)
+
+    corresp = []
+    for i in range(tot_cl):
+        corresp.append(indexes[i][1])
+
+    pred_corresp = [corresp[int(predicted)] for predicted in y_pred]
+    acc = np.sum(pred_corresp == y_t) / float(len(y_t))
+    return acc
+
+
 # Training
 print('==> Start training..')
-#net.train()
+nearest_dist = torch.from_numpy(upload_nearest_dist(args.dataset))
+if use_cuda:
+    nearest_dist = nearest_dist.to(device)
+
 for epoch in range(n_epoch):
     net.train()
     running_loss = 0.0
-    sum_aver_entropy = 0
-    sum_entropy_aver = 0
-    vatt = 0
     #   start_time = time.clock()
     for i, data in enumerate(trainloader, 0):
-        
         # get the inputs
-        inputs, labels = data
-        nearest_dist = torch.from_numpy(upload_nearest_dist(batch_size,i,args.dataset))
+        inputs, labels, ind = data
         if use_cuda:
-            inputs, labels, nearest_dist= inputs.to(device), labels.to(device), nearest_dist.to(device)
-        
-        # zero the parameter gradients
-        optimizer.zero_grad()
+            inputs, labels, nearest_dist, ind = inputs.to(device), labels.to(device), nearest_dist.to(device), ind.to(device)
         
         # forward
         aver_entropy, entropy_aver = Compute_entropy(net, Variable(inputs))
         r_mutual_i = aver_entropy - args.mu * entropy_aver
-        loss_ul = loss_unlabeled(inputs, nearest_dist)
+        loss_ul = loss_unlabeled(Variable(inputs), nearest_dist[ind])
         loss = loss_ul + args.lam * r_mutual_i
+        
+        # zero the parameter gradients
+        optimizer.zero_grad()
         
         # backward + optimize
         loss.backward()
         optimizer.step()
-        
         loss_ul.detach_()
         
         # loss accumulation
-        sum_aver_entropy += aver_entropy
-        sum_entropy_aver += entropy_aver
-        #vatt += loss_ul.item()
         running_loss += loss.item()
     print("running_loss: ",running_loss/(i+1))
-
     # statistics
     net.eval()
     p_pred = np.zeros((len(trainset),10))
     y_pred = np.zeros(len(trainset))
-    y = np.zeros(len(trainset))
-    for i, data in enumerate(trainloader, 0):
-        
-        inputs, labels = data
-        if use_cuda:
-            inputs, labels = inputs.to(device), labels.to(device)
-        outputs=F.softmax(net(inputs),dim=1)
-        y_pred[i*batch_size:(i+1)*batch_size]=torch.argmax(outputs,dim=1).cpu().numpy()
-        p_pred[i*batch_size:(i+1)*batch_size,:]=outputs.detach().cpu().numpy()
-        y[i*batch_size:(i+1)*batch_size]=labels.cpu().numpy()
+    y_t = np.zeros(len(trainset))
+    with torch.no_grad():
+        for i, data in enumerate(testloader, 0):
+            inputs, labels, ind = data
+            if use_cuda:
+                inputs, labels = inputs.to(device), labels.to(device)
+            outputs=F.softmax(net(inputs),dim=1)
+            y_pred[i*batch_size:(i+1)*batch_size]=torch.argmax(outputs,dim=1).cpu().numpy()
+            p_pred[i*batch_size:(i+1)*batch_size,:]=outputs.detach().cpu().numpy()
+            y_t[i*batch_size:(i+1)*batch_size]=labels.cpu().numpy()
 
-    print("epoch: ", epoch+1, "\t total lost = {:.4f} " .format(running_loss/(i+1)), "\t MI {:.4f}" .format(normalized_mutual_info_score(y, y_pred)), "\t acc = {:.4f} " .format(bestMap(y, y_pred)))
+#acc = compute_accuracy(y_pred, y_t)
+        print("epoch: ", epoch+1, "\t total lost = {:.4f} " .format(running_loss/(i+1)), "\t MI {:.4f}" .format(normalized_mutual_info_score(y_t, y_pred)), "\t acc = {:.4f} " .format(bestMap(y_t, y_pred)), "\t acc2 = {:.4f} " .format(compute_accuracy(y_pred, y_t)))
 #    print(time.clock() - start_time, "seconds")
 print('==> Finished Training..')
 
