@@ -71,17 +71,6 @@ testloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffl
 tot_cl = 10
 
 # Deep Neural Network
-class MyBatchNorm(nn.Module):
-    # not updat gamma and beta in batch normalization
-    def __init__(self, num_features, bn_in, eps=1e-05, momentum=0.1, affine = False):
-        super(MyBatchNorm, self).__init__()
-        self.bn = nn.BatchNorm1d(num_features,eps=eps,momentum=momentum,affine=affine)
-    def forward(self, x, bn_in):
-        gamma = bn_in.weight
-        beta = bn_in.bias
-        x.data = self.bn(x) * gamma.data + beta.data
-        return x
-
 class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()
@@ -95,9 +84,9 @@ class Net(nn.Module):
         torch.nn.init.normal_(self.fc3.weight,std=0.0001*math.sqrt(2/1200))
         self.fc3.bias.data.fill_(0)
         self.bn1=nn.BatchNorm1d(1200, eps=2e-5)
-        self.bn1_F= MyBatchNorm(1200,self.bn1)
+        self.bn1_F= nn.BatchNorm1d(1200, eps=2e-5, affine=False)
         self.bn2=nn.BatchNorm1d(1200, eps=2e-5)
-        self.bn1_F= MyBatchNorm(1200,self.bn1)
+        self.bn2_F= nn.BatchNorm1d(1200, eps=2e-5, affine=False)
     
     def forward(self, x, update_batch_stats=True):
         if not update_batch_stats:
@@ -174,7 +163,7 @@ def vat(network, distance, x, eps_list, xi=10, Ip=1):
 
 def enc_aux_noubs(x):
     # not updating gamma and beta in batchs
-    return net(x, update_batch_stats=True)
+    return net(x, update_batch_stats=False)
 
 def loss_unlabeled(x, eps_list):
     # to use enc_aux_noubs
