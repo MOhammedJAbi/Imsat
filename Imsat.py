@@ -200,11 +200,10 @@ print('==> Start training..')
 nearest_dist = torch.from_numpy(upload_nearest_dist(args.dataset))
 if use_cuda:
     nearest_dist = nearest_dist.to(device)
-
+best_acc = 0
 for epoch in range(n_epoch):
     net.train()
     running_loss = 0.0
-    best_acc = 0
     #   start_time = time.clock()
     for i, data in enumerate(trainloader, 0):
         # get the inputs
